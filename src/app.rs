@@ -1,22 +1,21 @@
 use std::{ops::RangeInclusive, time::Instant};
 
-use egui::{Color32, Pos2, Rect, Ui, Vec2, Visuals};
+use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2, Visuals};
 use log::{error, info};
 use rand::Rng;
 
-const SIMULATION_AREA_WIDTH: f32 = 800.0;
-const SIMULATION_AREA_HEIGHT: f32 = 600.0;
+const SIMULATION_AREA_WIDTH: f32 = 1600.0;
+const SIMULATION_AREA_HEIGHT: f32 = 1200.0;
 
 const LEFT: f32 = -SIMULATION_AREA_WIDTH / 2.0;
 const RIGHT: f32 = SIMULATION_AREA_WIDTH / 2.0;
 const TOP: f32 = -SIMULATION_AREA_HEIGHT / 2.0;
 const BOTTOM: f32 = SIMULATION_AREA_HEIGHT / 2.0;
 
-const NEIGHBOR_RADIUS: f32 = 50.0;
-
 const COHESION_COLOR: Color32 = Color32::BLUE;
-const SEPARATION_COLOR: Color32 = Color32::RED;
+const SEPARATION_COLOR: Color32 = Color32::YELLOW;
 const ALIGNMENT_COLOR: Color32 = Color32::GREEN;
+const AVOIDANCE_COLOR: Color32 = Color32::RED;
 
 const FRAME_TIME: f32 = 1.0 / 60.0;
 
@@ -49,9 +48,19 @@ pub struct BoidsApp {
     separation_weight: f32,
     #[serde(skip)]
     alignment_weight: f32,
+    #[serde(skip)]
+    avoidance_weight: f32,
+    #[serde(skip)]
+    avoidance_radius: f32,
 
     #[serde(skip)]
     cohesion_weight: f32,
+    #[serde(skip)]
+    neighbor_radius: f32,
+    #[serde(skip)]
+    paused: bool,
+    #[serde(skip)]
+    predator_pos: Option<Pos2>,
 }
 
 impl Default for BoidsApp {
@@ -66,12 +75,17 @@ impl Default for BoidsApp {
             separation_weight: 1.0,
             alignment_weight: 1.0,
             cohesion_weight: 1.0,
+            avoidance_weight: 1.0,
+            neighbor_radius: 50.0,
+            avoidance_radius: 75.0,
+            paused: false,
+            predator_pos: None,
         }
     }
 }
 
 impl BoidsApp {
-    pub fn update_boids(&mut self, dt: f32) {
+    pub fn update_boids(&mut self) {
         // SIMULATION LOGIC
         if self.boids.len() > self.num_boids {
             // Remove some boids
@@ -97,10 +111,10 @@ impl BoidsApp {
         }
 
         self.update_forces();
-        self.update_boids_position(dt);
+        self.update_boids_position();
     }
 
-    fn update_boids_position(&mut self, dt: f32) {
+    fn update_boids_position(&mut self) {
         // Update positions from velocity/acceleration
         for boid in &mut self.boids {
             // Apply the acceleration to the velocity
@@ -134,12 +148,14 @@ impl BoidsApp {
         let mut separation_forces: Vec<Vec2> = Vec::with_capacity(self.boids.len());
         let mut cohesion_forces: Vec<Vec2> = Vec::with_capacity(self.boids.len());
         let mut alignment_forces: Vec<Vec2> = Vec::with_capacity(self.boids.len());
+        let mut avoidance_forces: Vec<Vec2> = Vec::with_capacity(self.boids.len());
 
         for boid in &self.boids {
             separation_forces.push(boid.calculate_separation_force(
                 &self.boids,
                 self.separation_weight,
                 self.max_force,
+                self.neighbor_radius,
             ));
 
             alignment_forces.push(boid.calculate_alignment_force(
@@ -147,6 +163,7 @@ impl BoidsApp {
                 self.alignment_weight,
                 self.max_speed,
                 self.max_force,
+                self.neighbor_radius,
             ));
 
             cohesion_forces.push(boid.calculate_cohesion_force(
@@ -154,26 +171,52 @@ impl BoidsApp {
                 self.cohesion_weight,
                 self.max_force,
                 self.max_speed,
+                self.neighbor_radius,
             ));
+
+            if let Some(predator_position) = self.predator_pos {
+                avoidance_forces.push(boid.calculate_avoidance_force(
+                    predator_position,
+                    self.avoidance_weight,
+                    self.max_force,
+                    self.avoidance_radius,
+                ));
+            } else {
+                avoidance_forces.push(Vec2::ZERO);
+            }
         }
 
         for i in 0..self.boids.len() {
             self.boids[i].acceleration += separation_forces[i];
             self.boids[i].acceleration += alignment_forces[i];
             self.boids[i].acceleration += cohesion_forces[i];
+            self.boids[i].acceleration += avoidance_forces[i];
 
-            if separation_forces[i].length_sq() > alignment_forces[i].length_sq()
+            let separation_dominant = separation_forces[i].length_sq()
+                > alignment_forces[i].length_sq()
                 && separation_forces[i].length_sq() > cohesion_forces[i].length_sq()
-            {
-                self.boids[i].color = SEPARATION_COLOR;
-            } else if alignment_forces[i].length_sq() > separation_forces[i].length_sq()
+                && separation_forces[i].length_sq() > avoidance_forces[i].length_sq();
+            let alignment_dominant = alignment_forces[i].length_sq()
+                > separation_forces[i].length_sq()
                 && alignment_forces[i].length_sq() > cohesion_forces[i].length_sq()
-            {
-                self.boids[i].color = ALIGNMENT_COLOR;
-            } else if cohesion_forces[i].length_sq() > alignment_forces[i].length_sq()
+                && alignment_forces[i].length_sq() > avoidance_forces[i].length_sq();
+            let cohesion_dominant = cohesion_forces[i].length_sq()
+                > alignment_forces[i].length_sq()
                 && cohesion_forces[i].length_sq() > separation_forces[i].length_sq()
-            {
+                && cohesion_forces[i].length_sq() > avoidance_forces[i].length_sq();
+            let avoidance_dominant = avoidance_forces[i].length_sq()
+                > alignment_forces[i].length_sq()
+                && avoidance_forces[i].length_sq() > cohesion_forces[i].length_sq()
+                && avoidance_forces[i].length_sq() > separation_forces[i].length_sq();
+
+            if separation_dominant {
+                self.boids[i].color = SEPARATION_COLOR;
+            } else if alignment_dominant {
+                self.boids[i].color = ALIGNMENT_COLOR;
+            } else if cohesion_dominant {
                 self.boids[i].color = COHESION_COLOR;
+            } else if avoidance_dominant {
+                self.boids[i].color = AVOIDANCE_COLOR;
             }
         }
     }
@@ -208,9 +251,9 @@ impl eframe::App for BoidsApp {
         let dt = Instant::now()
             .saturating_duration_since(self.last_update_time)
             .as_secs_f32();
-        if dt >= FRAME_TIME {
+        if dt >= FRAME_TIME && !self.paused {
             self.last_update_time = Instant::now();
-            self.update_boids(dt);
+            self.update_boids();
             ctx.request_repaint();
         }
 
@@ -247,6 +290,29 @@ impl eframe::App for BoidsApp {
                 egui::Sense::hover(),
             );
 
+            if let Some(mouse_pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                ui.label(format!(
+                    "Mouse position: x = {:.2}, y = {:.2}",
+                    mouse_pos.x, mouse_pos.y
+                ));
+
+                if rect.contains(mouse_pos) {
+                    self.predator_pos = Some(mouse_pos - rect.center().to_vec2());
+                    let painter: egui::Painter = ui.painter_at(rect);
+                    painter.circle_filled(mouse_pos, 5.0, Color32::RED);
+                    painter.circle_stroke(
+                        mouse_pos,
+                        self.avoidance_radius,
+                        Stroke::new(5.0, Color32::RED),
+                    );
+                } else {
+                    self.predator_pos = None;
+                }
+            } else {
+                ui.label("Mouse is not within the window");
+                self.predator_pos = None;
+            }
+
             if ui.is_rect_visible(rect) {
                 // Draw some lines around the box to help with visualization
                 if self.draw_debug_perimeters {
@@ -254,8 +320,7 @@ impl eframe::App for BoidsApp {
                 }
 
                 for boid in &self.boids {
-                    let adjusted_pos = boid.position + rect.center().to_vec2();
-                    draw_boid(ui, &rect, adjusted_pos, boid.color);
+                    boid.draw_boid(ui, &rect);
                 }
             }
         });
@@ -269,6 +334,8 @@ impl eframe::App for BoidsApp {
             ));
 
             ui.checkbox(&mut self.draw_debug_perimeters, "Draw Debug Areas");
+            ui.checkbox(&mut self.paused, "Pause");
+
             ui.separator();
 
             ui.label("Max Velocity");
@@ -283,19 +350,22 @@ impl eframe::App for BoidsApp {
             ui.add(egui::DragValue::new(&mut self.cohesion_weight));
             ui.label("Alignment Weight");
             ui.add(egui::DragValue::new(&mut self.alignment_weight));
+
+            ui.label("Avoidance Weight");
+            ui.add(egui::DragValue::new(&mut self.avoidance_weight));
+
+            ui.separator();
+
+            ui.label("Neighbor Radius");
+            ui.add(egui::DragValue::new(&mut self.neighbor_radius));
+            ui.label("Avoidance Radius");
+            ui.add(egui::DragValue::new(&mut self.avoidance_radius));
         });
     }
 }
 
-fn draw_boid(ui: &mut Ui, rect: &Rect, center: Pos2, color: Color32) {
-    let painter = ui.painter_at(*rect);
-    let radius = 5.0;
-
-    painter.circle_filled(center, radius, color);
-}
-
 fn draw_perimeter(ui: &mut Ui, rect: &Rect) {
-    let painter = ui.painter_at(*rect);
+    let painter: egui::Painter = ui.painter_at(*rect);
 
     let top_left = rect.min;
     let bottom_right = rect.max;
@@ -329,11 +399,24 @@ impl Boid {
         }
     }
 
+    fn draw_boid(&self, ui: &mut Ui, rect: &Rect) {
+        let painter = ui.painter_at(*rect);
+        let size = 10.0;
+
+        // TODO: Fix me - arrow points in wrong direction
+        let stroke = egui::Stroke::new(2.0, self.color);
+        let adjusted_pos = self.position + rect.center().to_vec2();
+        painter.arrow(adjusted_pos, self.velocity.normalized() * size, stroke);
+
+        // painter.circle_filled(self.position, radius, self.color);
+    }
+
     pub fn calculate_separation_force(
         &self,
         boids: &[Boid],
         separation_weight: f32,
         max_force: f32,
+        neighbor_radius: f32,
     ) -> Vec2 {
         let mut steering_force = Vec2::ZERO;
         let mut count = 0;
@@ -342,7 +425,7 @@ impl Boid {
             let distance = (self.position - other.position).length();
 
             // If the other boid is within some small radius
-            if distance > 0.0 && distance < 15.0 {
+            if distance > 0.0 && distance < neighbor_radius {
                 // Try to move away from them
                 let dir_to_move: Vec2 = (self.position - other.position).normalized();
                 // distance;
@@ -368,13 +451,14 @@ impl Boid {
         cohesion_weight: f32,
         max_force: f32,
         max_speed: f32,
+        neighbor_radius: f32,
     ) -> Vec2 {
         let mut sum = Vec2::ZERO;
         let mut count = 0;
 
         for other in boids {
             let distance = (self.position - other.position).length();
-            if distance > 0.0 && distance < NEIGHBOR_RADIUS {
+            if distance > 0.0 && distance < neighbor_radius {
                 sum += other.position.to_vec2();
                 count += 1;
             }
@@ -403,6 +487,7 @@ impl Boid {
         alignment_weight: f32,
         max_speed: f32,
         max_force: f32,
+        neighbor_radius: f32,
     ) -> Vec2 {
         let mut sum = Vec2::ZERO;
         let mut count = 0;
@@ -410,7 +495,7 @@ impl Boid {
         // Trying to match the average of its neighbors velocity
         for other in boids {
             let distance = (self.position - other.position).length();
-            if distance > 0.0 && distance < NEIGHBOR_RADIUS {
+            if distance > 0.0 && distance < neighbor_radius {
                 sum += other.velocity;
                 count += 1;
             }
@@ -431,4 +516,31 @@ impl Boid {
             Vec2::ZERO
         }
     }
+
+    pub fn calculate_avoidance_force(
+        &self,
+        predator_position: Pos2,
+        avoidance_weight: f32,
+        max_force: f32,
+        avoidance_radius: f32,
+    ) -> Vec2 {
+        let distance = (self.position - predator_position).length();
+
+        if distance < avoidance_radius {
+            let steer = (self.position - predator_position).normalized();
+            // TODO: THis is fishy
+            if steer.length() > max_force {
+                steer.normalized() * max_force * avoidance_weight
+            } else {
+                steer * avoidance_weight
+            }
+        } else {
+            Vec2::ZERO
+        }
+    }
 }
+
+// Add vision cone
+// Switch boids to triangles
+// Add goals for groups
+// Add predator prey reaction
