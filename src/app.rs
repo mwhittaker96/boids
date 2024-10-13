@@ -1,11 +1,13 @@
-use std::{ops::RangeInclusive, time::Instant};
+use std::time::Instant;
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2, Visuals};
 use log::{error, info};
 use rand::Rng;
 
-const SIMULATION_AREA_WIDTH: f32 = 1600.0;
-const SIMULATION_AREA_HEIGHT: f32 = 1200.0;
+use crate::{boid::Boid, boids_simulation::BoidsSimulationParameters};
+
+const SIMULATION_AREA_WIDTH: f32 = 1700.0;
+const SIMULATION_AREA_HEIGHT: f32 = 950.0;
 
 const LEFT: f32 = -SIMULATION_AREA_WIDTH / 2.0;
 const RIGHT: f32 = SIMULATION_AREA_WIDTH / 2.0;
@@ -19,67 +21,30 @@ const AVOIDANCE_COLOR: Color32 = Color32::RED;
 
 const FRAME_TIME: f32 = 1.0 / 60.0;
 
-// Separation
-
-// Alignment
-
-// Cohesion
-
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct BoidsApp {
     #[serde(skip)]
     boids: Vec<Boid>,
-
-    // config stuff
-    #[serde(skip)]
-    num_boids: usize,
-    #[serde(skip)]
-    max_speed: f32,
-    #[serde(skip)]
-    max_force: f32,
     #[serde(skip)]
     last_update_time: std::time::Instant,
-
-    #[serde(skip)]
-    draw_debug_perimeters: bool,
-    #[serde(skip)]
-    separation_weight: f32,
-    #[serde(skip)]
-    alignment_weight: f32,
-    #[serde(skip)]
-    avoidance_weight: f32,
-    #[serde(skip)]
-    avoidance_radius: f32,
-
-    #[serde(skip)]
-    cohesion_weight: f32,
-    #[serde(skip)]
-    neighbor_radius: f32,
     #[serde(skip)]
     paused: bool,
     #[serde(skip)]
     predator_pos: Option<Pos2>,
+    #[serde(default)]
+    params: BoidsSimulationParameters,
 }
 
 impl Default for BoidsApp {
     fn default() -> Self {
         Self {
             boids: Vec::new(),
-            num_boids: 0,
-            max_force: 0.5,
-            max_speed: 5.0,
-            last_update_time: Instant::now(),
-            draw_debug_perimeters: true,
-            separation_weight: 1.0,
-            alignment_weight: 1.0,
-            cohesion_weight: 1.0,
-            avoidance_weight: 1.0,
-            neighbor_radius: 50.0,
-            avoidance_radius: 75.0,
-            paused: false,
             predator_pos: None,
+            last_update_time: Instant::now(),
+            paused: false,
+            params: BoidsSimulationParameters::default(),
         }
     }
 }
@@ -87,12 +52,12 @@ impl Default for BoidsApp {
 impl BoidsApp {
     pub fn update_boids(&mut self) {
         // SIMULATION LOGIC
-        if self.boids.len() > self.num_boids {
+        if self.boids.len() > self.params.num_boids {
             // Remove some boids
-            for _ in [0..self.boids.len() - self.num_boids] {
+            for _ in [0..self.boids.len() - self.params.num_boids] {
                 self.boids.remove(self.boids.len() - 1);
             }
-        } else if self.boids.len() < self.num_boids {
+        } else if self.boids.len() < self.params.num_boids {
             // Insert some boids
 
             let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
@@ -103,8 +68,8 @@ impl BoidsApp {
                 rng.gen_range(-SIMULATION_AREA_HEIGHT / 2.0..SIMULATION_AREA_HEIGHT / 2.0),
             );
             // Set a random initial velocity
-            let rand_x_vel = rng.gen_range(-self.max_speed..self.max_speed);
-            let rand_y_vel = rng.gen_range(-self.max_speed..self.max_speed);
+            let rand_x_vel = rng.gen_range(-self.params.max_speed..self.params.max_speed);
+            let rand_y_vel = rng.gen_range(-self.params.max_speed..self.params.max_speed);
             let random_velocity = Vec2::new(rand_x_vel, rand_y_vel);
 
             self.boids.push(Boid::new(pos, random_velocity));
@@ -117,30 +82,9 @@ impl BoidsApp {
     fn update_boids_position(&mut self) {
         // Update positions from velocity/acceleration
         for boid in &mut self.boids {
-            // Apply the acceleration to the velocity
-            boid.velocity = boid.velocity + boid.acceleration;
-            // clamp the velocity - can do length squared if needed here
-            if boid.velocity.length() > self.max_speed {
-                boid.velocity = boid.velocity.normalized() * self.max_speed;
-            }
-            // Zero out the acceleration
-            boid.acceleration = Vec2::ZERO;
-
-            boid.position += boid.velocity; //* dt;
-
-            // wrap position
-            if boid.position.x > RIGHT {
-                boid.position.x = LEFT;
-            }
-            if boid.position.x < LEFT {
-                boid.position.x = RIGHT;
-            }
-            if boid.position.y > BOTTOM {
-                boid.position.y = TOP;
-            }
-            if boid.position.y < TOP {
-                boid.position.y = BOTTOM;
-            }
+            boid.apply_forces(self.params.max_speed);
+            // screen wrap
+            boid.wrap(LEFT, RIGHT, TOP, BOTTOM);
         }
     }
 
@@ -153,33 +97,33 @@ impl BoidsApp {
         for boid in &self.boids {
             separation_forces.push(boid.calculate_separation_force(
                 &self.boids,
-                self.separation_weight,
-                self.max_force,
-                self.neighbor_radius,
+                self.params.separation_weight,
+                self.params.max_force,
+                self.params.neighbor_radius,
             ));
 
             alignment_forces.push(boid.calculate_alignment_force(
                 &self.boids,
-                self.alignment_weight,
-                self.max_speed,
-                self.max_force,
-                self.neighbor_radius,
+                self.params.alignment_weight,
+                self.params.max_speed,
+                self.params.max_force,
+                self.params.neighbor_radius,
             ));
 
             cohesion_forces.push(boid.calculate_cohesion_force(
                 &self.boids,
-                self.cohesion_weight,
-                self.max_force,
-                self.max_speed,
-                self.neighbor_radius,
+                self.params.cohesion_weight,
+                self.params.max_force,
+                self.params.max_speed,
+                self.params.neighbor_radius,
             ));
 
             if let Some(predator_position) = self.predator_pos {
                 avoidance_forces.push(boid.calculate_avoidance_force(
                     predator_position,
-                    self.avoidance_weight,
-                    self.max_force,
-                    self.avoidance_radius,
+                    self.params.avoidance_weight,
+                    self.params.max_force,
+                    self.params.avoidance_radius,
                 ));
             } else {
                 avoidance_forces.push(Vec2::ZERO);
@@ -232,7 +176,6 @@ impl BoidsApp {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
-            info!("had storage");
             return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
         }
 
@@ -302,7 +245,7 @@ impl eframe::App for BoidsApp {
                     painter.circle_filled(mouse_pos, 5.0, Color32::RED);
                     painter.circle_stroke(
                         mouse_pos,
-                        self.avoidance_radius,
+                        self.params.avoidance_radius,
                         Stroke::new(5.0, Color32::RED),
                     );
                 } else {
@@ -315,51 +258,19 @@ impl eframe::App for BoidsApp {
 
             if ui.is_rect_visible(rect) {
                 // Draw some lines around the box to help with visualization
-                if self.draw_debug_perimeters {
-                    draw_perimeter(ui, &rect);
-                }
+                draw_perimeter(ui, &rect);
 
                 for boid in &self.boids {
-                    boid.draw_boid(ui, &rect);
+                    boid.draw(ui, &rect);
                 }
             }
         });
 
         egui::SidePanel::right("config_panel").show(ctx, |ui| {
             ui.label("Configuration Panel");
-            ui.label("Number of Boids");
-            ui.add(egui::Slider::new(
-                &mut self.num_boids,
-                RangeInclusive::new(0, 1000),
-            ));
-
-            ui.checkbox(&mut self.draw_debug_perimeters, "Draw Debug Areas");
-            ui.checkbox(&mut self.paused, "Pause");
-
+            ui.checkbox(&mut self.paused, "Pause Simulation");
             ui.separator();
-
-            ui.label("Max Velocity");
-            ui.add(egui::DragValue::new(&mut self.max_speed));
-
-            ui.label("Max Force");
-            ui.add(egui::DragValue::new(&mut self.max_force));
-
-            ui.label("Separation Weight");
-            ui.add(egui::DragValue::new(&mut self.separation_weight));
-            ui.label("Cohesion Weight");
-            ui.add(egui::DragValue::new(&mut self.cohesion_weight));
-            ui.label("Alignment Weight");
-            ui.add(egui::DragValue::new(&mut self.alignment_weight));
-
-            ui.label("Avoidance Weight");
-            ui.add(egui::DragValue::new(&mut self.avoidance_weight));
-
-            ui.separator();
-
-            ui.label("Neighbor Radius");
-            ui.add(egui::DragValue::new(&mut self.neighbor_radius));
-            ui.label("Avoidance Radius");
-            ui.add(egui::DragValue::new(&mut self.avoidance_radius));
+            self.params.draw_panel(ui);
         });
     }
 }
@@ -379,168 +290,3 @@ fn draw_perimeter(ui: &mut Ui, rect: &Rect) {
     painter.line_segment([top_right, bottom_right], stroke);
     painter.line_segment([bottom_left, bottom_right], stroke);
 }
-
-// TODO: Move me to another file
-struct Boid {
-    pub velocity: Vec2,
-    pub position: Pos2,
-    pub acceleration: Vec2,
-
-    pub color: Color32,
-}
-
-impl Boid {
-    pub fn new(position: Pos2, initial_velocity: Vec2) -> Self {
-        Boid {
-            velocity: initial_velocity,
-            position,
-            acceleration: Vec2::ZERO,
-            color: Color32::WHITE,
-        }
-    }
-
-    fn draw_boid(&self, ui: &mut Ui, rect: &Rect) {
-        let painter = ui.painter_at(*rect);
-        let size = 10.0;
-
-        // TODO: Fix me - arrow points in wrong direction
-        let stroke = egui::Stroke::new(2.0, self.color);
-        let adjusted_pos = self.position + rect.center().to_vec2();
-        painter.arrow(adjusted_pos, self.velocity.normalized() * size, stroke);
-
-        // painter.circle_filled(self.position, radius, self.color);
-    }
-
-    pub fn calculate_separation_force(
-        &self,
-        boids: &[Boid],
-        separation_weight: f32,
-        max_force: f32,
-        neighbor_radius: f32,
-    ) -> Vec2 {
-        let mut steering_force = Vec2::ZERO;
-        let mut count = 0;
-
-        for other in boids {
-            let distance = (self.position - other.position).length();
-
-            // If the other boid is within some small radius
-            if distance > 0.0 && distance < neighbor_radius {
-                // Try to move away from them
-                let dir_to_move: Vec2 = (self.position - other.position).normalized();
-                // distance;
-                steering_force += dir_to_move;
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            steering_force /= count as f32;
-        }
-
-        if steering_force.length() > max_force {
-            steering_force.normalized() * max_force * separation_weight
-        } else {
-            steering_force * separation_weight
-        }
-    }
-
-    pub fn calculate_cohesion_force(
-        &self,
-        boids: &[Boid],
-        cohesion_weight: f32,
-        max_force: f32,
-        max_speed: f32,
-        neighbor_radius: f32,
-    ) -> Vec2 {
-        let mut sum = Vec2::ZERO;
-        let mut count = 0;
-
-        for other in boids {
-            let distance = (self.position - other.position).length();
-            if distance > 0.0 && distance < neighbor_radius {
-                sum += other.position.to_vec2();
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            sum /= count as f32;
-            return self.seek(sum, max_speed, max_force) * cohesion_weight;
-        }
-
-        Vec2::ZERO
-    }
-
-    fn seek(&self, target_pos: Vec2, max_speed: f32, max_force: f32) -> Vec2 {
-        let desired = (target_pos - self.position.to_vec2()).normalized() * max_speed;
-        let mut steer = desired - self.velocity;
-        if steer.length() > max_force {
-            steer = steer.normalized() * max_force;
-        }
-        steer
-    }
-
-    pub fn calculate_alignment_force(
-        &self,
-        boids: &[Boid],
-        alignment_weight: f32,
-        max_speed: f32,
-        max_force: f32,
-        neighbor_radius: f32,
-    ) -> Vec2 {
-        let mut sum = Vec2::ZERO;
-        let mut count = 0;
-
-        // Trying to match the average of its neighbors velocity
-        for other in boids {
-            let distance = (self.position - other.position).length();
-            if distance > 0.0 && distance < neighbor_radius {
-                sum += other.velocity;
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            sum /= count as f32;
-            sum = sum.normalized() * max_speed;
-
-            let steer = sum - self.velocity;
-            // If the force exceeds our max force, make sure to cap it
-            if steer.length() > max_force {
-                steer.normalized() * max_force * alignment_weight
-            } else {
-                steer * alignment_weight
-            }
-        } else {
-            Vec2::ZERO
-        }
-    }
-
-    pub fn calculate_avoidance_force(
-        &self,
-        predator_position: Pos2,
-        avoidance_weight: f32,
-        max_force: f32,
-        avoidance_radius: f32,
-    ) -> Vec2 {
-        let distance = (self.position - predator_position).length();
-
-        if distance < avoidance_radius {
-            let steer = (self.position - predator_position).normalized();
-            // TODO: THis is fishy
-            if steer.length() > max_force {
-                steer.normalized() * max_force * avoidance_weight
-            } else {
-                steer * avoidance_weight
-            }
-        } else {
-            Vec2::ZERO
-        }
-    }
-}
-
-// Add vision cone
-// Switch boids to triangles
-// Add goals for groups
-// Add predator prey reaction

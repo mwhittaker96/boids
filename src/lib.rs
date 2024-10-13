@@ -2,3 +2,6 @@
 
 mod app;
 pub use app::BoidsApp;
+
+mod boid;
+mod boids_simulation;
