@@ -81,7 +81,7 @@ impl BoidsApp {
     fn update_boids_position(&mut self) {
         // Update positions from velocity/acceleration
         for boid in &mut self.boids {
-            boid.apply_forces(self.params.max_speed);
+            boid.apply_forces(&self.params);
             // screen wrap
             boid.screen_wrap(LEFT, RIGHT, TOP, BOTTOM);
         }
@@ -94,38 +94,15 @@ impl BoidsApp {
         let mut avoidance_forces: Vec<Vec2> = Vec::with_capacity(self.boids.len());
 
         for boid in &self.boids {
-            separation_forces.push(boid.calculate_separation_force(
-                &self.boids,
-                self.params.separation_weight,
-                self.params.max_force,
-                self.params.max_speed,
-                self.params.neighbor_radius,
-            ));
+            separation_forces.push(boid.calculate_separation_force(&self.boids, &self.params));
 
-            alignment_forces.push(boid.calculate_alignment_force(
-                &self.boids,
-                self.params.alignment_weight,
-                self.params.max_speed,
-                self.params.max_force,
-                self.params.neighbor_radius,
-            ));
+            alignment_forces.push(boid.calculate_alignment_force(&self.boids, &self.params));
 
-            cohesion_forces.push(boid.calculate_cohesion_force(
-                &self.boids,
-                self.params.cohesion_weight,
-                self.params.max_force,
-                self.params.max_speed,
-                self.params.neighbor_radius,
-            ));
+            cohesion_forces.push(boid.calculate_cohesion_force(&self.boids, &self.params));
 
             if let Some(predator_position) = self.predator_pos {
-                avoidance_forces.push(boid.calculate_avoidance_force(
-                    predator_position,
-                    self.params.avoidance_weight,
-                    self.params.max_force,
-                    self.params.max_speed,
-                    self.params.avoidance_radius,
-                ));
+                avoidance_forces
+                    .push(boid.calculate_avoidance_force(predator_position, &self.params));
             } else {
                 avoidance_forces.push(Vec2::ZERO);
             }

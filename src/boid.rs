@@ -1,5 +1,7 @@
 use egui::{Color32, Pos2, Rect, Ui, Vec2};
 
+use crate::boids_simulation::BoidsSimulationParameters;
+
 // Add vision cone
 // Add goals for groups
 
@@ -30,12 +32,12 @@ impl Boid {
         painter.arrow(adjusted_pos, self.velocity.normalized() * size, stroke);
     }
 
-    pub fn apply_forces(&mut self, max_speed: f32) {
+    pub fn apply_forces(&mut self, params: &BoidsSimulationParameters) {
         // Apply the acceleration to the velocity
         self.velocity = self.velocity + self.acceleration;
         // clamp the velocity - can do length squared if needed here
-        if self.velocity.length() > max_speed {
-            self.velocity = self.velocity.normalized() * max_speed;
+        if self.velocity.length() > params.max_speed {
+            self.velocity = self.velocity.normalized() * params.max_speed;
         }
         // Zero out the acceleration
         self.acceleration = Vec2::ZERO;
@@ -61,10 +63,7 @@ impl Boid {
     pub fn calculate_separation_force(
         &self,
         boids: &[Boid],
-        separation_weight: f32,
-        max_force: f32,
-        max_speed: f32,
-        neighbor_radius: f32,
+        params: &BoidsSimulationParameters,
     ) -> Vec2 {
         let mut sum = Vec2::ZERO;
         let mut count = 0;
@@ -73,7 +72,7 @@ impl Boid {
             let distance = (self.position - other.position).length();
 
             // If the other boid is near us
-            if distance > 0.0 && distance < neighbor_radius {
+            if distance > 0.0 && distance < params.neighbor_radius {
                 // Try to move away from them
                 let desired_direction: Vec2 = (self.position - other.position).normalized();
                 sum += desired_direction;
@@ -83,14 +82,14 @@ impl Boid {
 
         if count > 0 {
             let average_desired_direction = sum / count as f32;
-            let desired_velocity = average_desired_direction.normalized() * max_speed;
+            let desired_velocity = average_desired_direction.normalized() * params.max_speed;
 
             let mut steering_force = desired_velocity - self.velocity;
-            if steering_force.length() > max_force {
-                steering_force = steering_force.normalized() * max_force;
+            if steering_force.length() > params.max_force {
+                steering_force = steering_force.normalized() * params.max_force;
             }
 
-            steering_force * separation_weight
+            steering_force * params.separation_weight
         } else {
             Vec2::ZERO
         }
@@ -99,17 +98,14 @@ impl Boid {
     pub fn calculate_cohesion_force(
         &self,
         boids: &[Boid],
-        cohesion_weight: f32,
-        max_force: f32,
-        max_speed: f32,
-        neighbor_radius: f32,
+        params: &BoidsSimulationParameters,
     ) -> Vec2 {
         let mut sum = Vec2::ZERO;
         let mut count = 0;
 
         for other in boids {
             let distance = (self.position - other.position).length();
-            if distance > 0.0 && distance < neighbor_radius {
+            if distance > 0.0 && distance < params.neighbor_radius {
                 sum += other.position.to_vec2();
                 count += 1;
             }
@@ -119,14 +115,15 @@ impl Boid {
             let average_position_of_neighbors = sum / count as f32;
 
             // We want to move at the max speed towards our neighbors
-            let desired_velocity =
-                (average_position_of_neighbors - self.position.to_vec2()).normalized() * max_speed;
+            let desired_velocity = (average_position_of_neighbors - self.position.to_vec2())
+                .normalized()
+                * params.max_speed;
 
             let mut steering_force = desired_velocity - self.velocity;
-            if steering_force.length() > max_force {
-                steering_force = steering_force.normalized() * max_force;
+            if steering_force.length() > params.max_force {
+                steering_force = steering_force.normalized() * params.max_force;
             }
-            return steering_force * cohesion_weight;
+            return steering_force * params.cohesion_weight;
         }
 
         Vec2::ZERO
@@ -135,10 +132,7 @@ impl Boid {
     pub fn calculate_alignment_force(
         &self,
         boids: &[Boid],
-        alignment_weight: f32,
-        max_speed: f32,
-        max_force: f32,
-        neighbor_radius: f32,
+        params: &BoidsSimulationParameters,
     ) -> Vec2 {
         let mut sum = Vec2::ZERO;
         let mut count = 0;
@@ -146,7 +140,7 @@ impl Boid {
         // Trying to match the average of its neighbors velocity
         for other in boids {
             let distance = (self.position - other.position).length();
-            if distance > 0.0 && distance < neighbor_radius {
+            if distance > 0.0 && distance < params.neighbor_radius {
                 sum += other.velocity;
                 count += 1;
             }
@@ -158,17 +152,17 @@ impl Boid {
             // We set the desired velocity to the max speed and not simply to the average speed of our neighbors because
             // if we just try to achieve the same velocity as our neighbors we get this stalling behavior where the average speed is falling
             // rather than sweeping up boids into the flock. So we want to align on direction but not match speed necessarily
-            let desired_velocity = average_velocity_of_neighbors.normalized() * max_speed;
+            let desired_velocity = average_velocity_of_neighbors.normalized() * params.max_speed;
 
             // Here we're basically using force and acceleration interchangeably, which makes sense in the case where mass is some unit value
             // So now the steering force is just the difference in our current velocity and the desired velocity, and so the force is what would
             // need to be applied in order to match our direction to the neighbors
             let steer_force = desired_velocity - self.velocity;
             // If the force exceeds our max force, make sure to cap it
-            if steer_force.length() > max_force {
-                steer_force.normalized() * max_force * alignment_weight
+            if steer_force.length() > params.max_force {
+                steer_force.normalized() * params.max_force * params.alignment_weight
             } else {
-                steer_force * alignment_weight
+                steer_force * params.alignment_weight
             }
         } else {
             Vec2::ZERO
@@ -178,24 +172,21 @@ impl Boid {
     pub fn calculate_avoidance_force(
         &self,
         predator_position: Pos2,
-        avoidance_weight: f32,
-        max_force: f32,
-        max_speed: f32,
-        avoidance_radius: f32,
+        params: &BoidsSimulationParameters,
     ) -> Vec2 {
         let distance = (self.position - predator_position).length();
 
-        if distance < avoidance_radius {
+        if distance < params.avoidance_radius {
             // We know this will have the unit length of 1
             let steer_direction = (self.position - predator_position).normalized();
-            let desired_steer_velocity = steer_direction * max_speed; // the boid wants to steer away from the predator as fast as it can
+            let desired_steer_velocity = steer_direction * params.max_speed; // the boid wants to steer away from the predator as fast as it can
 
             let steer_force = desired_steer_velocity - self.velocity;
 
-            if steer_force.length() > max_force {
-                steer_force.normalized() * max_force * avoidance_weight
+            if steer_force.length() > params.max_force {
+                steer_force.normalized() * params.max_force * params.avoidance_weight
             } else {
-                steer_force * avoidance_weight
+                steer_force * params.avoidance_weight
             }
         } else {
             Vec2::ZERO
