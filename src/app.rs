@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2, Visuals};
-use log::{error, info};
 use rand::Rng;
 
 use crate::{boid::Boid, boids_simulation::BoidsSimulationParameters};
@@ -84,7 +83,7 @@ impl BoidsApp {
         for boid in &mut self.boids {
             boid.apply_forces(self.params.max_speed);
             // screen wrap
-            boid.wrap(LEFT, RIGHT, TOP, BOTTOM);
+            boid.screen_wrap(LEFT, RIGHT, TOP, BOTTOM);
         }
     }
 
@@ -99,6 +98,7 @@ impl BoidsApp {
                 &self.boids,
                 self.params.separation_weight,
                 self.params.max_force,
+                self.params.max_speed,
                 self.params.neighbor_radius,
             ));
 
@@ -123,6 +123,7 @@ impl BoidsApp {
                     predator_position,
                     self.params.avoidance_weight,
                     self.params.max_force,
+                    self.params.max_speed,
                     self.params.avoidance_radius,
                 ));
             } else {
@@ -191,6 +192,7 @@ impl eframe::App for BoidsApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // App Update
         let dt = Instant::now()
             .saturating_duration_since(self.last_update_time)
             .as_secs_f32();
@@ -204,20 +206,13 @@ impl eframe::App for BoidsApp {
 
         // HACK! Idk why i ended up needing to do this in the update loop
         ctx.set_visuals(Visuals::dark());
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
-
             egui::menu::bar(ui, |ui| {
                 // NOTE: no File->Quit on web pages!
                 let is_web = cfg!(target_arch = "wasm32");
                 if !is_web {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Config").clicked() {
-                            error!("Config clicked! Implement me!");
-                        }
                         if ui.button("Quit").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
@@ -234,11 +229,6 @@ impl eframe::App for BoidsApp {
             );
 
             if let Some(mouse_pos) = ctx.input(|i| i.pointer.hover_pos()) {
-                ui.label(format!(
-                    "Mouse position: x = {:.2}, y = {:.2}",
-                    mouse_pos.x, mouse_pos.y
-                ));
-
                 if rect.contains(mouse_pos) {
                     self.predator_pos = Some(mouse_pos - rect.center().to_vec2());
                     let painter: egui::Painter = ui.painter_at(rect);
@@ -252,7 +242,6 @@ impl eframe::App for BoidsApp {
                     self.predator_pos = None;
                 }
             } else {
-                ui.label("Mouse is not within the window");
                 self.predator_pos = None;
             }
 
